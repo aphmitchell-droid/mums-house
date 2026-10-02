@@ -5,8 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Mum's House — Estate Inventory & Allocation</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏠</text></svg>">
-  <meta name="description" content="Interactive estate inventory for Mum's House — track items, room photos, decisions, and family allocation.">
-    
+      
   <!-- Modern Typography: Plus Jakarta Sans -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -2537,6 +2536,7 @@
 
   <!-- Firebase Realtime Sync Scripts -->
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🏠</text></svg>">
   <meta name="description" content="Estate inventory for Mum's House — track items by room, decision and owner.">
@@ -2814,19 +2814,14 @@ roomOrder.forEach(rk => {
 
 // Roles: 'alex', 'vanessa', 'mum'
 let currentRole = null;
-let currentPin = localStorage.getItem('mumshouse_master_pin') || '2931';
+// The PIN is never sent to the browser. A guess is checked by the database
+// rules: writing it to mumshouse/unlocks/<uid> only succeeds if it matches.
+let fbUid = null;
+try { localStorage.removeItem('mumshouse_master_pin'); } catch (e) {}
 
-function loadMasterPin() {
-  if (fbDb) {
-    fbDb.ref('mumshouse/config/pin').on('value', snap => {
-      const v = snap.val();
-      if (v && String(v).length === 4) {
-        currentPin = String(v);
-        localStorage.setItem('mumshouse_master_pin', currentPin);
-        updatePinDisplay();
-      }
-    });
-  }
+function checkPinOnServer(pin) {
+  if (!fbDb || !fbUid) return Promise.reject(new Error('not-signed-in'));
+  return fbDb.ref('mumshouse/unlocks/' + fbUid).set(pin);
 }
 
 function updatePinDisplay() {
@@ -2854,11 +2849,6 @@ function submitChangePin() {
   const conf = document.getElementById('confirmPinInput').value.trim();
   const err = document.getElementById('changePinError');
 
-  if (curr !== currentPin) {
-    err.textContent = 'Current PIN is incorrect.';
-    err.style.display = 'block';
-    return;
-  }
   if (!/^[0-9]{4}$/.test(np)) {
     err.textContent = 'New PIN must be exactly 4 digits.';
     err.style.display = 'block';
@@ -2870,13 +2860,18 @@ function submitChangePin() {
     return;
   }
 
-  currentPin = np;
-  localStorage.setItem('mumshouse_master_pin', np);
-  if (fbDb) {
-    fbDb.ref('mumshouse/config/pin').set(np);
-  }
-  closeChangePinModal();
-  showToast('PIN updated 🔑');
+  checkPinOnServer(curr)
+    .catch(() => { throw new Error('bad-current'); })
+    .then(() => fbDb.ref('mumshouse/config/pin').set(np))
+    .then(() => checkPinOnServer(np))
+    .then(() => {
+      closeChangePinModal();
+      showToast('PIN updated 🔑');
+    })
+    .catch(e => {
+      err.textContent = e.message === 'bad-current' ? 'Current PIN is incorrect.' : 'Could not save PIN. Check your connection.';
+      err.style.display = 'block';
+    });
 }
 
 
@@ -3046,7 +3041,7 @@ function verifyPin() {
   const whoParam = (params.get('who') || params.get('user') || params.get('role') || '').toLowerCase();
   const isAdminTarget = path.includes('/admin') || whoParam === 'admin';
 
-  if (entered === currentPin) {
+  checkPinOnServer(entered).then(() => {
     if (isAdminTarget) {
       sessionStorage.setItem('admin_pin_unlocked', 'true');
       currentRole = 'admin';
@@ -3059,7 +3054,7 @@ function verifyPin() {
     document.getElementById('pinModal').classList.add('hidden');
     applyRoleConfig();
     render();
-  } else {
+  }).catch(() => {
     const err = document.getElementById('pinError');
     if (err) err.style.display = 'block';
     ['pin1', 'pin2', 'pin3', 'pin4'].forEach(id => {
@@ -3068,7 +3063,7 @@ function verifyPin() {
         el.classList.add('pin-digit-error');
       }
     });
-  }
+  });
 }
 
 function applyRoleConfig() {
@@ -3215,6 +3210,11 @@ function renderFilterPills() {
   });
 }
 
+// 800px copies of each photo live in /thumbs/ with the same path
+function thumbSrc(p) {
+  return p ? p.replace(/^\/photos\//, '/thumbs/') : p;
+}
+
 function initFirebase() {
   try {
     const cfg = {
@@ -3229,6 +3229,22 @@ function initFirebase() {
     const app = firebase.initializeApp(cfg);
     fbDb = firebase.database();
     fbRef = fbDb.ref('mumshouse/decisions');
+    if (typeof firebase.auth !== 'function') {
+      attachFirebaseListeners();
+      return;
+    }
+    firebase.auth().signInAnonymously()
+      .then(cred => { fbUid = cred.user.uid; })
+      .catch(e => console.error('Firebase sign-in error:', e))
+      .then(attachFirebaseListeners);
+  } catch(e) {
+    console.error('Firebase error:', e);
+    showSyncStatus('offline');
+  }
+}
+
+function attachFirebaseListeners() {
+  try {
     initFirebasePinsSync();
     
     fbDb.ref('.info/connected').on('value', snap => {
@@ -3500,7 +3516,7 @@ function renderRooms() {
     // Thumbnail container
     h += '<div class="room-thumb-wrapper">';
     if (ft && ft.thumb) {
-      h += '<img class="room-thumb" src="' + ft.thumb + '" loading="lazy" alt="' + roomCleanName + '">';
+      h += '<img class="room-thumb" src="' + thumbSrc(ft.thumb) + '" loading="lazy" decoding="async" alt="' + roomCleanName + '">';
     } else {
       h += '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:#64748B;font-size:32px;">📷</div>';
     }
@@ -3637,7 +3653,7 @@ function renderExp(el, rk) {
     if (photo.thumb) {
       h += '<div class="interactive-photo-card" id="card_' + rk + '_' + pIdx + '" onclick="onPhotoCardClick(event, \'' + rk + '\', ' + pIdx + ')">';
       h += '<div class="photo-img-wrap" id="photoWrap_' + rk + '_' + pIdx + '">';
-      h += '<img src="' + photo.thumb + '" alt="' + roomCleanName + ' Photo">';
+      h += '<img src="' + thumbSrc(photo.thumb) + '" loading="lazy" decoding="async" alt="' + roomCleanName + ' Photo">';
       h += '<div class="photo-pins-layer" id="pinsLayer_' + rk + '_' + pIdx + '">';
       pi.forEach((item, idx) => {
         if (item.deleted) return;
@@ -4257,7 +4273,6 @@ if (currentRole) {
   render();
 }
 initFirebase();
-loadMasterPin();
 
 // ==========================================
 // Visual Photo Pins & Real-Time Coordinates

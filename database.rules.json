@@ -1,0 +1,30 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "mumshouse": {
+      "decisions": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      },
+      "pins": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      },
+      "config": {
+        "pin": {
+          ".read": false,
+          ".write": "auth != null && root.child('mumshouse/unlocks/' + auth.uid).val() === data.val()",
+          ".validate": "newData.isString() && newData.val().matches(/^[0-9]{4}$/)"
+        }
+      },
+      "unlocks": {
+        "$uid": {
+          ".read": false,
+          ".write": "auth != null && auth.uid === $uid",
+          ".validate": "newData.val() === root.child('mumshouse/config/pin').val()"
+        }
+      }
+    }
+  }
+}
